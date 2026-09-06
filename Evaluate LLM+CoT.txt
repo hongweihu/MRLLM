@@ -98,103 +98,110 @@ Reply ONLY in the following JSON format:
 
 # CoT suggestions for penalty function optimization
 def generate_cot_suggestions(total_cost, h2_cost, component_operation_cost, pv_curtailment_cost, 
-                             power_loss, heat_loss, power_loss_eval, heat_loss_eval, 
-                             current_params=None, total_train_reward=None):
+                             power_loss, heat_loss, power_loss_eval, heat_loss_eval,
+                             best_code=None, best_loss_sum=None, current_loss_sum=None,
+                             cost_eval=None, previous_total_cost=None,
+                             relative_cost_change=None):
     """
-    Generate Chain of Thought suggestions for penalty function optimization
-    Considering the reward = -(total_cost + power_loss_reward + heat_loss_reward) relationship
+    Generate Chain of Thought suggestions for rewriting the Python penalty function.
     """
     suggestions = []
     
-    suggestions.append("Based on the given feedback, adjust the parameters of the penalty function. Let's think step by step:")
-    suggestions.append("1. ANALYSIS: Check current performance against safety constraints and economic goals.")
-    
-    if current_params:
-        power_eta1 = current_params["power_params"]["eta1"]
-        heat_eta1 = current_params["heat_params"]["eta1"]
-        suggestions.append(f"   - Current Parameters: Power eta1={power_eta1}, Heat eta1={heat_eta1}")
+    suggestions.append("Redesign the penalty function based on the given feedback. Let's think step by step:")
+    suggestions.append("1. ANALYSIS: Check current performance against the zero-loss feasibility rule (power_loss <= 0 and heat_loss <= 0).")
     
     suggestions.append(f"   - Loss Status: Power_loss={power_loss:.2f} ({power_loss_eval}), Heat_loss={heat_loss:.2f} ({heat_loss_eval})")
     suggestions.append(f"   - Cost Breakdown: H2={h2_cost:.2f}, Ops={component_operation_cost:.2f}, PV_curt={pv_curtailment_cost:.2f}")
+    if cost_eval is not None:
+        suggestions.append(f"   - Cost Evaluation: {cost_eval}. This feedback is separate from the loss labels.")
     
-    AGGRESSIVE = "SIGNIFICANTLY INCREASE (e.g., multiply by 2.0 or add 50-100)"
-    MODERATE = "INCREASE (e.g., add 20-50)"
-    SLIGHT_INC = "SLIGHTLY INCREASE (e.g., add 5-10)"
-    SLIGHT_DEC = "SLIGHTLY DECREASE (e.g., subtract 5-10)"
+    AGGRESSIVE = "Use a finite linear-plus-mild-power curve (power <= 1.5) and keep the multiplier between 5 and 40; never use exponential/cubic growth."
+    MODERATE = "INCREASE the multiplier or slightly adjust the curve shape."
+    SLIGHT_DEC = "SLIGHTLY DECREASE the penalty severity to prioritize cost savings."
 
+    suggestions.append("2. ECONOMIC TRADE-OFF & RL OPTIMIZATION ANALYSIS:")
+    if cost_eval == "increasing" and power_loss_eval == "very good" and heat_loss_eval == "very good":
+        suggestions.append("   - COST-AWARE HISTORICAL FEEDBACK: reliability is already perfect but cost increased relative to the preceding round; reduce unnecessary conservatism while preserving non-positive loss.")
+    # Detect an unstable low-cost/high-loss policy before the generic loss
+    # branch, otherwise the old logic incorrectly recommended larger penalties.
+    if total_cost < 100000 and (power_loss > 10000 or heat_loss > 10000):
+        suggestions.append("   - DIAGNOSIS: The policy is exploiting an unstable reward trade-off (very low cost with massive loss). Keep a dense positive penalty for every positive per-step loss, but do not increase beyond a bounded 5-40 multiplier.")
+        suggestions.append("   - STRATEGY: Use a linear term plus a mild power <= 1.5; avoid thresholds that make small per-step losses free.")
+    # Check if penalties are too weak
+    elif power_loss > 1000 or heat_loss > 1000:
+        suggestions.append("   - DIAGNOSIS: The losses are massive (>1000). Your previous penalty was TOO WEAK compared to the cost of buying hydrogen/operating equipment.")
+        suggestions.append("   - STRATEGY: Increase only within the bounded 5-40 range and keep the penalty active for every positive per-step loss. Do not use 100+ multipliers.")
 
-    if power_loss > 1000 or heat_loss > 1000:
-        suggestions.append("2. MATHEMATICAL INSIGHT: The losses are massive (>1000). This likely means the current calculated penalty is SMALLER than the cost (e.g., H2 price) required to fix the loss.")
-        suggestions.append("   - The RL agent is choosing to 'pay the fine' rather than 'buy the fuel' because the fine is too cheap.")
-        suggestions.append(f"   - STRATEGY: You must invert this relationship by {AGGRESSIVE} parameters.")
+    suggestions.append("3. IMBALANCE DETECTION:")
+    # Check if it's over-optimizing one at the expense of the other
+    if power_loss_eval == "very good" and heat_loss_eval == "bad":
+        suggestions.append("   - DIAGNOSIS: IMBALANCE. The agent is perfectly fixing Power Loss but ignoring Heat Loss.")
+        suggestions.append("   - STRATEGY: Increase the multiplier for the Heat Loss penalty to force the agent to care about it.")
+    elif heat_loss_eval == "very good" and power_loss_eval == "bad":
+        suggestions.append("   - DIAGNOSIS: IMBALANCE. The agent is perfectly fixing Heat Loss but ignoring Power Loss.")
+        suggestions.append("   - STRATEGY: Increase the multiplier for the Power Loss penalty.")
+    else:
+        suggestions.append("   - No severe imbalance detected, or both are moving in the same direction.")
 
-    suggestions.append("3. POWER PARAMETER STRATEGY:")
-    if power_loss_eval == "bad": 
-        suggestions.append(f"   - CRITICAL: Power loss ({power_loss:.2f}) is SEVERELY above target (10).")
-        suggestions.append(f"   - ACTION: {AGGRESSIVE} power_params (eta1/eta2/eta3).")
+    suggestions.append("4. POWER PARAMETER STRATEGY:")
+    if power_loss_eval == "bad":
+        suggestions.append(f"   - CRITICAL: Power loss ({power_loss:.2f}) is SEVERELY above target (10). ACTION: {AGGRESSIVE}")
+    elif power_loss_eval == "not good":
+        suggestions.append(f"   - STATUS: Power loss ({power_loss:.2f}) is unacceptable but improving. ACTION: {MODERATE}")
+    elif power_loss_eval == "good":
         if total_cost > 1e6:
-             suggestions.append("   - IGNORE the high total cost for now. Safety constraints are the hard threshold; economy is secondary.")
-    
-    elif power_loss_eval == "not good":  
-        suggestions.append(f"   - STATUS: Power loss ({power_loss:.2f}) is unacceptable but improving. {MODERATE} power_params to push it below 100.")
-    
-    elif power_loss_eval == "good": 
-        if total_cost > 1e6:
-            suggestions.append(f"   - STATUS: Power loss is controlled ({power_loss:.2f}), but cost is high.")
-            suggestions.append(f"   - ACTION: Consider {SLIGHT_DEC} power penalties to allow the agent slightly more flexibility to reduce costs.")
-        else:
-            suggestions.append("   - STATUS: Power loss is controlled. Maintain current power parameters.")
-    
-    else:  # "very good" <= 10
+            suggestions.append(f"   - STATUS: Power loss is controlled. ACTION: {SLIGHT_DEC} to improve economy.")
+    else:
         suggestions.append("   - STATUS: Power loss is perfect. Focus entirely on optimizing heat parameters or reducing cost.")
 
-    suggestions.append("4. HEAT PARAMETER STRATEGY:")
-    if heat_loss_eval == "bad":  
-        suggestions.append(f"   - CRITICAL: Heat loss ({heat_loss:.2f}) is SEVERELY above target. The current penalty is too weak.")
-        suggestions.append(f"   - ACTION: {AGGRESSIVE} heat_params. Make the penalty painful enough to force equipment usage (e.g., electric boiler/FC heat).")
-    
+    suggestions.append("5. HEAT PARAMETER STRATEGY:")
+    if heat_loss_eval == "bad":
+        suggestions.append(f"   - CRITICAL: Heat loss ({heat_loss:.2f}) is SEVERELY above target (10). ACTION: {AGGRESSIVE}")
     elif heat_loss_eval == "not good":
-        suggestions.append(f"   - STATUS: Heat loss is not ideal. {MODERATE} heat_params.")
-    
+        suggestions.append(f"   - STATUS: Heat loss is not ideal. ACTION: {MODERATE}")
     elif heat_loss_eval == "good":
         if total_cost > 1e6:
-            suggestions.append(f"   - STATUS: Heat loss controlled ({heat_loss:.2f}), cost high. {SLIGHT_DEC} heat penalties to improve economy.")
-        else:
-            suggestions.append("   - STATUS: Heat loss is well-controlled. Fine-tune for stability.")
-    
-    else:  # "very good"
-        suggestions.append("   - STATUS: Heat loss is very low. Minimize heat parameter changes unless cost optimization requires it.")
+            suggestions.append(f"   - STATUS: Heat loss controlled. ACTION: {SLIGHT_DEC} to improve economy.")
+    else:
+        suggestions.append("   - STATUS: Heat loss is well-controlled. Minimize heat penalty changes.")
+
+    suggestions.append("6. MATH & STRUCTURAL RULES (CRITICAL FOR PPO):")
+    suggestions.append("   - DO NOT use `math.exp`, `**3`, or `**4`. They are too unstable and cause gradient explosions.")
+    suggestions.append("   - DO NOT use `min()` to cap the penalty. It creates zero gradients (flat lines) where the agent cannot learn.")
+    suggestions.append("   - AVOID using boring piecewise linear functions (`if/elif/else`) that jump abruptly.")
+    suggestions.append("   - Stick exclusively to smooth curves: `excess ** 1.2`, `excess ** 1.5`, or Huber-like combinations (quadratic near zero, linear for large values).")
 
     if power_loss_eval == "bad" and heat_loss_eval == "bad":
-        suggestions.append("5. EMERGENCY PROTOCOL:")
+        suggestions.append("7. EMERGENCY PROTOCOL:")
         suggestions.append("   - SITUATION: Both Power and Heat constraints are failing completely.")
-        suggestions.append("   - CONCLUSION: The agent is stuck in a local optimum where it ignores constraints to save money.")
-        suggestions.append("   - OVERRIDE: Do NOT worry about Total Cost increase. Drastically increase ALL parameters to break the agent out of this state.")
-
-    suggestions.append("6. ECONOMIC FINE-TUNING (Only if constraints are met):")
-    if h2_cost > component_operation_cost + pv_curtailment_cost:
-        suggestions.append("   - H2 cost is dominant. If losses are low, check if penalties are too high, causing panic-buying of H2.")
-    elif pv_curtailment_cost > h2_cost + component_operation_cost:
-        suggestions.append("   - PV curtailment is high. Ensure penalties don't discourage using PV for power/heat.")
-    if power_loss_eval == "bad" and heat_loss_eval != "bad":
-        suggestions.append("IMBALANCE DETECTED: Heat Loss is improving but Power Loss is WORSENING significantly.")
-        suggestions.append("   - The agent is prioritizing Heat over Power due to excessive Heat penalties.")
-        suggestions.append("   - ACTION: INCREASE Power parameters AND DECREASE Heat parameters to restore balance.")
-    
-    if heat_loss > 1000 and current_params["heat_params"]["eta1"] > 800000:
-        suggestions.append("PHYSICAL LIMIT WARNING: Heat parameters are massive (>800k) but Heat Loss remains high (~2900).")
-        suggestions.append("   - This indicates a HARD PHYSICAL CONSTRAINT (e.g., equipment capacity limit).")
-        suggestions.append("   - Increasing Heat parameters further will likely yield ZERO improvement and may destabilize training.")
-        suggestions.append("   - ACTION: STOP increasing Heat parameters. Maintain them at current levels.")
-        suggestions.append("   - FOCUS: Instead, increase Power parameters to eliminate the remaining Power Loss (391).")
+        suggestions.append("   - OVERRIDE: Do NOT worry about Total Cost. Drastically increase multipliers in BOTH functions using safe smooth curves.")
+    suggestions.append("7. FINE-TUNING & BEST CODE PRESERVATION:")
+    if best_loss_sum is not None and best_code is not None:
+        if current_loss_sum <= best_loss_sum:
+            suggestions.append("   - EXCELLENT: Your current code achieved a new BEST record (lowest combined losses)!")
+            suggestions.append("   - STRATEGY: Make only VERY SMALL TWEAKS (e.g., adjust a multiplier by 5% or 10%). Do not completely rewrite the mathematical structure. We are almost there.")
+        else:
+            suggestions.append(f"   - WARNING: Your current code is WORSE than a previous version we found (Best Loss was {best_loss_sum:.2f}, but current is {current_loss_sum:.2f}).")
+            suggestions.append("   - STRATEGY: Discard the current bad structure. Go back to a variation of the successful code. Here is the BEST code structure we found so far as reference:")
+            suggestions.append(f"```python\n{best_code}\n```")
+            suggestions.append("   - Please rewrite the penalty function based on this BEST code structure, but try slightly different multipliers.")
+    if power_loss_eval == "very good" and heat_loss_eval == "very good":
+        suggestions.append("7. ECONOMIC REFINEMENT:")
+        if previous_total_cost is None or relative_cost_change is None:
+            suggestions.append("   - This is the baseline round; retain the current cost as the historical reference.")
+        elif relative_cost_change <= 0.005:
+            suggestions.append("   - COST STABLE: the absolute change from the immediately preceding round is <= 0.5%; make only a bounded local change or stop if all safety gates pass.")
+        elif total_cost < previous_total_cost:
+            suggestions.append("   - COST IMPROVING: the measured cost decreased relative to the immediately preceding round; preserve zero loss and continue conservative local refinement.")
+        else:
+            suggestions.append("   - COST INCREASING: the measured cost increased relative to the immediately preceding round; reduce unnecessary penalty severity without permitting positive loss.")
                 
+            
     suggestions.extend([
-        "7. FINAL GUIDELINES:",
-        "- Output ONLY JSON. No explanations.",
-        "- Maintain Monotonicity: eta1 >= eta2 >= eta3 is MANDATORY for both sets.",
-        "- Hierarchy: Safety (Loss < 10) > Economy (Cost). First fix the loss, then fix the cost.",
-        "- Magnitude: Don't be afraid to double parameters (e.g. 50 -> 100) if losses are > 1000.",
-        ""
+        "8. FINAL GUIDELINES:",
+        "- Output ONLY the Python code. No explanations or comments outside the code block.",
+        "- Do NOT change the function names.",
+        "- Feasibility (power_loss <= 0 and heat_loss <= 0) > Economy. First obtain non-positive loss, then use only adjacent-round cost changes for refinement."
     ])
     
     return suggestions
