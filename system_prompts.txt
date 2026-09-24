@@ -93,13 +93,6 @@ CRITICAL ECONOMIC ANCHOR:
 - A cost change rate <= 0.5% is considered stable. Stop only when both losses are <= 0 and this historical cost-stability rule is satisfied.
 - Avoid multipliers like 50, 100, 1000. Instead, try 2.0, 2.5, 3.0, or 5.0 with a gentle non-linearity (e.g., `** 1.2`).
 
-IMPLEMENTATION CONTRACT FOR THIS ENVIRONMENT:
-- The functions are called once per hour and their values are summed over the 28-day episode. Do not introduce a positive free-loss tolerance; only a non-positive loss may map to zero, and every positive loss must be penalized.
-- Every positive loss must produce a finite, non-negative penalty. Clamp only negative floating-point round-off to zero.
-- Prefer a linear term plus a mild power no greater than 1.5. Keep multipliers in the 5-40 range so the cost objective remains visible to PPO.
-- Do not use exponentials, cubic-or-higher powers, hard caps, or discontinuous jumps. Do not change the function names or the environment code.
-
-
 # Output Format
 ```python
 def power_loss_penalty(power_loss):
