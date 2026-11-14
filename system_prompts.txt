@@ -102,3 +102,4 @@ def power_loss_penalty(power_loss):
 def heat_loss_penalty(heat_loss):
     heat_loss_penalty = heat_loss * 2 ## your designed heat_loss penalty function 
     return heat_loss_penalty
+```
